@@ -11,7 +11,7 @@
 # See Unicorn::Configurator for information on how to configure unicorn.
 class Unicorn::HttpServer
   # :stopdoc:
-  attr_accessor :app, :timeout, :worker_processes,
+  attr_accessor :app, :timeout, :sigterm_timeout, :worker_processes,
                 :before_fork, :after_fork, :before_exec,
                 :listener_opts, :preload_app,
                 :orig_app, :config, :ready_pipe, :user
@@ -284,10 +284,10 @@ class Unicorn::HttpServer
       when nil
         # avoid murdering workers after our master process (or the
         # machine) comes out of suspend/hibernation
-        if (last_check + @timeout) >= (last_check = time_now)
+        if (last_check + @sigterm_timeout) >= (last_check = time_now)
           sleep_time = murder_lazy_workers
         else
-          sleep_time = @timeout/2.0 + 1
+          sleep_time = @sigterm_timeout/2.0 + 1
           @logger.debug("waiting #{sleep_time}s after suspend/hibernation")
         end
         maintain_worker_count if respawn
@@ -495,21 +495,29 @@ class Unicorn::HttpServer
 
   # forcibly terminate all workers that haven't checked in in timeout seconds.  The timeout is implemented using an unlinked File
   def murder_lazy_workers
-    next_sleep = @timeout - 1
+    next_sleep = @sigterm_timeout - 1
     now = time_now.to_i
     @workers.dup.each_pair do |wpid, worker|
       tick = worker.tick
       0 == tick and next # skip workers that haven't processed any clients
       diff = now - tick
-      tmp = @timeout - diff
+      tmp = @sigterm_timeout - diff
+
       if tmp >= 0
         next_sleep > tmp and next_sleep = tmp
         next
       end
       next_sleep = 0
-      logger.error "worker=#{worker.nr} PID:#{wpid} timeout " \
-                   "(#{diff}s > #{@timeout}s), killing"
-      kill_worker(:KILL, wpid) # take no prisoners for timeout violations
+
+      if diff > @timeout
+        logger.error "worker=#{worker.nr} PID:#{wpid} timeout " \
+        "(#{diff}s > #{@timeout}s), killing with SIGKILL"
+        kill_worker(:KILL, wpid) # take no prisoners for timeout violations
+      elsif diff > @sigterm_timeout
+        logger.error "worker=#{worker.nr} PID:#{wpid} timeout " \
+        "(#{diff}s > #{@sigterm_timeout}s), killing with SIGTERM"
+        kill_worker(:TERM, wpid) # take no prisoners for timeout violations
+      end
     end
     next_sleep <= 0 ? 1 : next_sleep
   end
@@ -655,7 +663,6 @@ class Unicorn::HttpServer
     LISTENERS.each { |sock| sock.close_on_exec = true }
 
     worker.user(*user) if user.kind_of?(Array) && ! worker.switched
-    self.timeout /= 2.0 # halve it for select()
     @config = nil
     build_app! unless preload_app
     @after_fork = @listener_opts = @orig_app = nil
@@ -718,7 +725,7 @@ class Unicorn::HttpServer
 
       # timeout used so we can detect parent death:
       worker.tick = time_now.to_i
-      ret = IO.select(readers, nil, nil, @timeout) and ready = ret[0]
+      ret = IO.select(readers, nil, nil, @sigterm_timeout / 2.0) and ready = ret[0]
     rescue => e
       redo if nr < 0 && readers[0]
       Unicorn.log_error(@logger, "listen loop error", e) if readers[0]

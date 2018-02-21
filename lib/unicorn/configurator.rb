@@ -30,6 +30,7 @@ class Unicorn::Configurator
   # Default settings for Unicorn
   DEFAULTS = {
     :timeout => 60,
+    :sigterm_timeout => 60,
     :logger => Logger.new($stderr),
     :worker_processes => 1,
     :after_fork => lambda { |server, worker|
@@ -237,11 +238,24 @@ class Unicorn::Configurator
   #
   # See http://nginx.org/en/docs/http/ngx_http_upstream_module.html
   # for more details on nginx upstream configuration.
-  def timeout(seconds)
+  #
+  # The following options may be specified:
+  #
+  # [:sigterm => seconds]
+  #
+  #   Send SIGTERM when worker process is timed out.
+  #   Workers can't output backtrace if it's received SIGKILL
+  #   so it's useful to send SIGTERM before SIGKILL to find slow codes.
+  #   If you specify sigterm greater than or equal to timeout, workers will be always killed by SIGKILL.
+  #
+  #   Default: same seconds as the timeout
+  def timeout(seconds, options = {})
     set_int(:timeout, seconds, 3)
     # POSIX says 31 days is the smallest allowed maximum timeout for select()
     max = 30 * 60 * 60 * 24
     set[:timeout] = seconds > max ? max : seconds
+
+    set_int(:sigterm_timeout, options[:sigterm] || set[:timeout], 3)
   end
 
   # Whether to exec in each worker process after forking.  This changes the
