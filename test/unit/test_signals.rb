@@ -118,6 +118,49 @@ class SignalsTest < Test::Unit::TestCase
       Process.kill(:TERM, pid) rescue nil
   end
 
+  def test_timeout_slow_response_with_sigterm
+    pid = fork {
+      app = lambda { |env|
+        Signal.trap(:TERM) {
+          puts 'Killed by SIGTERM'
+
+          exit
+        }
+
+        sleep
+      }
+      redirect_test_io {
+        Tempfile.open(['config', '.rb']) { |file|
+          file.write(<<-EOS)
+            timeout 100, sigterm: 3
+          EOS
+
+          file.flush
+
+          HttpServer.new(app, @server_opts.merge(config_file: file.path)).start.join
+        }
+      }
+    }
+    t0 = Time.now
+    wait_workers_ready("test_stderr.#{pid}.log", 1)
+    sock = TCPSocket.new('127.0.0.1', @port)
+    sock.syswrite("GET / HTTP/1.0\r\n\r\n")
+
+    buf = nil
+    assert_raises(EOFError,Errno::ECONNRESET,Errno::EPIPE,Errno::EINVAL,
+                  Errno::EBADF) do
+      buf = sock.sysread(4096)
+    end
+    diff = Time.now - t0
+    assert_nil buf
+    assert diff > 1.0, "diff was #{diff.inspect}"
+    assert diff < 60.0
+    assert_equal "Killed by SIGTERM\n", File.read("test_stdout.#{pid}.log")
+    wait_workers_ready("test_stderr.#{pid}.log", 1)
+    ensure
+      Process.kill(:TERM, pid) rescue nil
+  end
+
   def test_response_write
     app = lambda { |env|
       [ 200, { 'Content-Type' => 'text/plain', 'X-Pid' => Process.pid.to_s },
